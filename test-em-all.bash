@@ -1,57 +1,76 @@
 #!/usr/bin/env bash
-set -euo pipefail
+: ${HOST=localhost}
+: ${PORT=7001}
+: ${PROD_ID_REVS_RECS=1}
+: ${PROD_ID_NOT_FOUND=13}
+: ${PROD_ID_NO_RECS=113}
+: ${PROD_ID_NO_REVS=213}
 
-base_url="http://localhost:7001/product-composite"
-response_file=$(mktemp)
-trap 'rm -f "$response_file"' EXIT
+function assertCurl() {
 
-check_response() {
-    local product_id="$1"
-    local expected_status="$2"
-    local json_check="${3:-}"
-    local actual_status
+  local expectedHttpCode=$1
+  local curlCmd="$2 -w \"%{http_code}\""
+  local result=$(eval $curlCmd)
+  local httpCode="${result:(-3)}"
+  RESPONSE='' && (( ${#result} > 3 )) && RESPONSE="${result%???}"
 
-    actual_status=$(curl --silent --show-error \
-        --output "$response_file" \
-        --write-out '%{http_code}' \
-        "$base_url/$product_id")
-
-    if [[ "$actual_status" != "$expected_status" ]]; then
-        printf 'FAIL /%s: expected HTTP %s, got %s\n' \
-            "$product_id" "$expected_status" "$actual_status"
-        cat "$response_file"
-        printf '\n'
-        exit 1
+  if [ "$httpCode" = "$expectedHttpCode" ]
+  then
+    if [ "$httpCode" = "200" ]
+    then
+      echo "Test OK (HTTP Code: $httpCode)"
+    else
+      echo "Test OK (HTTP Code: $httpCode, $RESPONSE)"
     fi
-
-    if [[ -n "$json_check" ]] && ! jq -e "$json_check" "$response_file" >/dev/null; then
-        printf 'FAIL /%s: unexpected JSON response\n' "$product_id"
-        cat "$response_file"
-        printf '\n'
-        exit 1
-    fi
-
-    printf 'PASS /%s (HTTP %s)\n' "$product_id" "$actual_status"
+  else
+    echo  "Test FAILED, EXPECTED HTTP Code: $expectedHttpCode, GOT: $httpCode, WILL ABORT!"
+    echo  "- Failing command: $curlCmd"
+    echo  "- Response Body: $RESPONSE"
+    exit 1
+  fi
 }
 
-check_response 1 200 \
-    '.productId == 1 and .name == "name-1" and
-     (.recommendations | length) == 3 and (.reviews | length) == 3'
+function assertEqual() {
 
-check_response 13 404 \
-    '.message == "No product found for productId: 13"'
+  local expected=$1
+  local actual=$2
 
-check_response 113 200 \
-    '.productId == 113 and
-     .recommendations == [] and (.reviews | length) == 3'
+  if [ "$actual" = "$expected" ]
+  then
+    echo "Test OK (actual value: $actual)"
+  else
+    echo "Test FAILED, EXPECTED VALUE: $expected, ACTUAL VALUE: $actual, WILL ABORT"
+    exit 1
+  fi
+}
 
-check_response 213 200 \
-    '.productId == 213 and
-     (.recommendations | length) == 3 and .reviews == []'
+set -e
 
-check_response -1 422 \
-    '.message == "Invalid productId: -1"'
+echo "HOST=${HOST}"
+echo "PORT=${PORT}"
 
-check_response no-integer 400
+assertCurl 200 "curl http://$HOST:$PORT/product-composite/$PROD_ID_REVS_RECS -s"
+assertEqual $PROD_ID_REVS_RECS $(echo $RESPONSE | jq .productId)
+assertEqual 3 $(echo $RESPONSE | jq ".recommendations | length")
+assertEqual 3 $(echo $RESPONSE | jq ".reviews | length")
 
-printf 'All 6 checks passed.\n'
+assertCurl 404 "curl http://$HOST:$PORT/product-composite/$PROD_ID_NOT_FOUND -s"
+assertEqual "No product found for productId: $PROD_ID_NOT_FOUND" "$(echo $RESPONSE | jq -r .message)"
+
+assertCurl 200 "curl http://$HOST:$PORT/product-composite/$PROD_ID_NO_RECS -s"
+assertEqual $PROD_ID_NO_RECS $(echo $RESPONSE | jq .productId)
+assertEqual 0 $(echo $RESPONSE | jq ".recommendations | length")
+assertEqual 3 $(echo $RESPONSE | jq ".reviews | length")
+
+assertCurl 200 "curl http://$HOST:$PORT/product-composite/$PROD_ID_NO_REVS -s"
+assertEqual $PROD_ID_NO_REVS $(echo $RESPONSE | jq .productId)
+assertEqual 3 $(echo $RESPONSE | jq ".recommendations | length")
+assertEqual 0 $(echo $RESPONSE | jq ".reviews | length")
+
+assertCurl 422 "curl http://$HOST:$PORT/product-composite/-1 -s"
+assertEqual "\"Invalid productId: -1\"" "$(echo $RESPONSE | jq .message)"
+
+assertCurl 400 "curl http://$HOST:$PORT/product-composite/invalidProductId -s"
+assertEqual "\"Type mismatch.\"" "$(echo $RESPONSE | jq .message)"
+
+echo "End, all tests OK:" `date`
