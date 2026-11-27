@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+#
+# Sample usage:
+#
+#   HOST=localhost PORT=8080 ./test-em-all.bash
+#   ./test-em-all.bash start stop
+#
 : ${HOST=localhost}
 : ${PORT=8080}
 
@@ -42,7 +48,7 @@ function assertEqual() {
 
 function testUrl() {
   url=$@
-  if curl $url -ks -f -o /dev/null
+  if $url -ks -f -o /dev/null
   then
     return 0
   else
@@ -69,6 +75,48 @@ function waitForService() {
   echo "DONE, continues..."
 }
 
+function recreateComposite() {
+  local productId=$1
+  local composite=$2
+
+  assertCurl 200 "curl -X DELETE http://$HOST:$PORT/product-composite/${productId} -s"
+  curl -X POST http://$HOST:$PORT/product-composite -H "Content-Type: application/json" --data "$composite"
+}
+
+function setupTestdata() {
+
+  body="{\"productId\":1"
+  body+=\
+',"name":"product 1","weight":1, "recommendations":[
+  {"recommendationId":1,"author":"author 1","rate":1,"content":"content 1"},
+  {"recommendationId":2,"author":"author 2","rate":2,"content":"content 2"},
+  {"recommendationId":3,"author":"author 3","rate":3,"content":"content 3"}
+], "reviews":[
+  {"reviewId":1,"author":"author 1","subject":"subject 1","content":"content 1"},
+  {"reviewId":2,"author":"author 2","subject":"subject 2","content":"content 2"},
+  {"reviewId":3,"author":"author 3","subject":"subject 3","content":"content 3"}
+]}'
+  recreateComposite 1 "$body"
+
+  body="{\"productId\":113"
+  body+=\
+',"name":"product 113","weight":113, "reviews":[
+  {"reviewId":1,"author":"author 1","subject":"subject 1","content":"content 1"},
+  {"reviewId":2,"author":"author 2","subject":"subject 2","content":"content 2"},
+  {"reviewId":3,"author":"author 3","subject":"subject 3","content":"content 3"}
+]}'
+  recreateComposite 113 "$body"
+
+  body="{\"productId\":213"
+  body+=\
+',"name":"product 213","weight":213, "recommendations":[
+  {"recommendationId":1,"author":"author 1","rate":1,"content":"content 1"},
+  {"recommendationId":2,"author":"author 2","rate":2,"content":"content 2"},
+  {"recommendationId":3,"author":"author 3","rate":3,"content":"content 3"}
+]}'
+  recreateComposite 213 "$body"
+}
+
 set -e
 
 echo "Start Tests:" `date`
@@ -85,31 +133,42 @@ then
   docker compose up -d
 fi
 
-waitForService curl http://$HOST:${PORT}/product-composite/1
+# get 대신 delete API 로 대기 → 3개 핵심 서비스가 모두 호출되므로 전부 떠 있는지 확인됨
+waitForService curl -X DELETE http://$HOST:$PORT/product-composite/13
 
+setupTestdata
+
+# Verify that a normal request works, expect three recommendations and three reviews
 assertCurl 200 "curl http://$HOST:$PORT/product-composite/1 -s"
 assertEqual 1 $(echo $RESPONSE | jq .productId)
 assertEqual 3 $(echo $RESPONSE | jq ".recommendations | length")
 assertEqual 3 $(echo $RESPONSE | jq ".reviews | length")
 
+# Verify that a 404 (Not Found) error is returned for a non existing productId (13)
 assertCurl 404 "curl http://$HOST:$PORT/product-composite/13 -s"
+assertEqual "No product found for productId: 13" "$(echo $RESPONSE | jq -r .message)"
 
+# Verify that no recommendations are returned for productId 113
 assertCurl 200 "curl http://$HOST:$PORT/product-composite/113 -s"
 assertEqual 113 $(echo $RESPONSE | jq .productId)
 assertEqual 0 $(echo $RESPONSE | jq ".recommendations | length")
 assertEqual 3 $(echo $RESPONSE | jq ".reviews | length")
 
+# Verify that no reviews are returned for productId 213
 assertCurl 200 "curl http://$HOST:$PORT/product-composite/213 -s"
 assertEqual 213 $(echo $RESPONSE | jq .productId)
 assertEqual 3 $(echo $RESPONSE | jq ".recommendations | length")
 assertEqual 0 $(echo $RESPONSE | jq ".reviews | length")
 
+# Verify that a 422 (Unprocessable Entity) error is returned for a productId that is out of range (-1)
 assertCurl 422 "curl http://$HOST:$PORT/product-composite/-1 -s"
 assertEqual "\"Invalid productId: -1\"" "$(echo $RESPONSE | jq .message)"
 
+# Verify that a 400 (Bad Request) error error is returned for a productId that is not a number, i.e. invalid format
 assertCurl 400 "curl http://$HOST:$PORT/product-composite/invalidProductId -s"
 assertEqual "\"Type mismatch.\"" "$(echo $RESPONSE | jq .message)"
 
+# Verify access to Swagger and OpenAPI URLs
 echo "Swagger/OpenAPI tests"
 assertCurl 302 "curl -s  http://$HOST:$PORT/openapi/swagger-ui.html"
 assertCurl 200 "curl -sL http://$HOST:$PORT/openapi/swagger-ui.html"
