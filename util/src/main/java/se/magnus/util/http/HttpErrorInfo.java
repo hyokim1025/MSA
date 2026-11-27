@@ -8,4 +8,8 @@ public record HttpErrorInfo(
         String path,
         HttpStatus httpStatus,
         String message
-) {}
+) {
+    public HttpErrorInfo(HttpStatus httpStatus, String path, String message) {
+        this(ZonedDateTime.now(), path, httpStatus, message);
+    }
+}
