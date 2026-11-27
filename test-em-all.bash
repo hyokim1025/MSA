@@ -4,6 +4,7 @@
 #
 #   HOST=localhost PORT=8080 ./test-em-all.bash
 #   ./test-em-all.bash start stop
+#   COMPOSE_FILE=docker-compose-kafka.yml ./test-em-all.bash start stop
 #
 : ${HOST=localhost}
 : ${PORT=8080}
@@ -75,12 +76,46 @@ function waitForService() {
   echo "DONE, continues..."
 }
 
+function testCompositeCreated() {
+
+  # Expect that the Product Composite for productId 1 has been created with three recommendations and three reviews
+  local result=$(curl http://$HOST:$PORT/product-composite/1 -s)
+
+  if [ "$(echo $result | jq .productId)" != "1" ] ; then return 1; fi
+  if [ "$(echo $result | jq '.recommendations | length')" != "3" ] ; then return 1; fi
+  if [ "$(echo $result | jq '.reviews | length')" != "3" ] ; then return 1; fi
+
+  return 0
+}
+
+function waitForMessageProcessing() {
+  echo "Wait for messages to be processed... "
+
+  # Give the background processing some time to complete...
+  sleep 1
+
+  n=0
+  until testCompositeCreated
+  do
+    n=$((n + 1))
+    if [[ $n == 40 ]]
+    then
+      echo " Give up"
+      exit 1
+    else
+      sleep 6
+      echo -n ", retry #$n "
+    fi
+  done
+  echo "All messages are now processed!"
+}
+
 function recreateComposite() {
   local productId=$1
   local composite=$2
 
-  assertCurl 200 "curl -X DELETE http://$HOST:$PORT/product-composite/${productId} -s"
-  curl -X POST http://$HOST:$PORT/product-composite -H "Content-Type: application/json" --data "$composite"
+  assertCurl 202 "curl -X DELETE http://$HOST:$PORT/product-composite/${productId} -s"
+  assertEqual 202 $(curl -X POST -s http://$HOST:$PORT/product-composite -H "Content-Type: application/json" --data "$composite" -w "%{http_code}")
 }
 
 function setupTestdata() {
@@ -133,10 +168,11 @@ then
   docker compose up -d
 fi
 
-# get 대신 delete API 로 대기 → 3개 핵심 서비스가 모두 호출되므로 전부 떠 있는지 확인됨
-waitForService curl -X DELETE http://$HOST:$PORT/product-composite/13
+waitForService curl http://$HOST:$PORT/actuator/health
 
 setupTestdata
+
+waitForMessageProcessing
 
 # Verify that a normal request works, expect three recommendations and three reviews
 assertCurl 200 "curl http://$HOST:$PORT/product-composite/1 -s"
